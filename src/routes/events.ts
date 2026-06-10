@@ -729,6 +729,7 @@ router.post("/:id/urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET,
     const eventRepo = AppDataSource.getRepository(Event);
     const flowRepo = AppDataSource.getRepository(EventFlow);
     const notifRepo = AppDataSource.getRepository(Notification);
+    const userRepo = AppDataSource.getRepository(User);
 
     const event = await eventRepo.findOne({ where: { id: req.params.id } });
     if (!event) return AppError.throwNotFound("Event not found");
@@ -737,20 +738,25 @@ router.post("/:id/urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET,
       throw new AppError("Completed or closed events cannot be urged", 400, 400);
     }
 
+    if (!event.assigneeId) {
+      throw new AppError("Cannot urge: no assignee yet. Please assign the event first before urging.", 400, 400);
+    }
+
     const authUser = req.user!;
     const handlerId = event.assigneeId;
 
-    if (handlerId) {
-      const notif = notifRepo.create({
-        userId: handlerId,
-        type: "urge",
-        title: "Event handling urged",
-        content: `Urgent reminder for event "${event.title}" (${event.eventNo}): ${content}`,
-        eventId: event.id,
-        isRead: false,
-      });
-      await notifRepo.save(notif);
-    }
+    const handler = await userRepo.findOne({ where: { id: handlerId } });
+    const handlerName = handler ? (handler as any).realName || (handler as any).username : event.assigneeName || "";
+
+    const notif = notifRepo.create({
+      userId: handlerId,
+      type: "urge",
+      title: "Event handling urged",
+      content: `Urgent reminder for event "${event.title}" (${event.eventNo}): ${content}`,
+      eventId: event.id,
+      isRead: false,
+    });
+    await notifRepo.save(notif);
 
     await flowRepo.save(flowRepo.create({
       eventId: event.id,
@@ -767,10 +773,37 @@ router.post("/:id/urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET,
       order: { createdAt: "ASC" },
     });
 
+    const urgeFlows = flows.filter((f: any) => f.action === "urge");
+    const urgeNotifications = await notifRepo.find({
+      where: { eventId: event.id, type: "urge" },
+      order: { createdAt: "ASC" },
+    });
+
+    const urgeRecords = urgeFlows.map((f: any) => {
+      const matchedNotif = urgeNotifications.find((n: any) => {
+        const nTime = new Date(n.createdAt).getTime();
+        const fTime = new Date(f.createdAt).getTime();
+        return Math.abs(nTime - fTime) < 5000;
+      });
+      return {
+        id: (f as any).id,
+        operatorId: (f as any).operatorId,
+        operatorName: (f as any).operatorName,
+        content: (f as any).remark,
+        targetUserId: handlerId,
+        targetUserName: handlerName,
+        createdAt: (f as any).createdAt,
+        notificationRead: matchedNotif ? (matchedNotif as any).isRead : null,
+        notificationReadAt: matchedNotif && (matchedNotif as any).isRead ? (matchedNotif as any).readAt : null,
+      };
+    });
+
     success(res, {
-      event: { id: event.id, status: event.status, eventNo: event.eventNo },
+      event: { id: event.id, status: event.status, eventNo: event.eventNo, assigneeId: handlerId, assigneeName: handlerName },
       urged: true,
       urgedAt: new Date(),
+      urgeRecords,
+      totalUrgeCount: urgeRecords.length,
       flows,
     }, "Event urged successfully, notification sent to handler");
   } catch (err) {

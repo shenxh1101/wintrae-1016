@@ -168,7 +168,7 @@ router.get("/events", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROLES.A
     }
 
     if (sourcePlatform) {
-      queryBuilder = queryBuilder.andWhere("e.reportedFrom = :sp", { sp: sourcePlatform });
+      queryBuilder = queryBuilder.andWhere("e.source = :sp", { sp: sourcePlatform });
     }
 
     if (communityId) {
@@ -221,29 +221,49 @@ router.get("/events", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROLES.A
   }
 });
 
+function buildExportQueryBuilder(eventRepo: any, params: any) {
+  const { communityId, gridAreaId, eventType, status, isOverdue, isRepeated, gridWorkerId, startDate, endDate, sourcePlatform } = params;
+
+  let builder = eventRepo.createQueryBuilder("e");
+
+  if (communityId) builder = builder.where("e.communityId = :cid", { cid: communityId });
+  if (gridAreaId) builder = builder.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+  if (eventType) builder = builder.andWhere("e.eventType = :et", { et: eventType });
+  if (status) builder = builder.andWhere("e.status = :st", { st: status });
+  if (isOverdue !== undefined) builder = builder.andWhere("e.isOverdue = :io", { io: isOverdue === "true" });
+  if (isRepeated !== undefined) builder = builder.andWhere("e.isRepeated = :ir", { ir: isRepeated === "true" });
+  if (sourcePlatform) builder = builder.andWhere("e.source = :sp", { sp: sourcePlatform });
+  if (gridWorkerId) builder = builder.andWhere("(e.reporterId = :gwid OR e.assigneeId = :gwid)", { gwid: gridWorkerId });
+  if (startDate) builder = builder.andWhere("e.createdAt >= :sd", { sd: new Date(startDate as string) });
+  if (endDate) builder = builder.andWhere("e.createdAt <= :ed", { ed: new Date(endDate + "T23:59:59") });
+
+  builder = builder.orderBy("e.createdAt", "DESC");
+  return builder;
+}
+
 router.get("/events/export", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET, ROLES.COMMUNITY, ROLES.UPPER_PLATFORM), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const eventRepo = AppDataSource.getRepository(Event);
     const communityRepo = AppDataSource.getRepository(Community);
     const gridRepo = AppDataSource.getRepository(GridArea);
 
+    const format = (req.query.format as string) || "csv";
     const { communityId, gridAreaId, eventType, status, isOverdue, isRepeated, gridWorkerId, startDate, endDate, sourcePlatform } = req.query;
 
-    let builder = eventRepo.createQueryBuilder("e");
-
-    if (communityId) builder = builder.where("e.communityId = :cid", { cid: communityId });
-    if (gridAreaId) builder = builder.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
-    if (eventType) builder = builder.andWhere("e.eventType = :et", { et: eventType });
-    if (status) builder = builder.andWhere("e.status = :st", { st: status });
-    if (isOverdue !== undefined) builder = builder.andWhere("e.isOverdue = :io", { io: isOverdue === "true" });
-    if (isRepeated !== undefined) builder = builder.andWhere("e.isRepeated = :ir", { ir: isRepeated === "true" });
-    if (sourcePlatform) builder = builder.andWhere("e.sourcePlatform = :sp", { sp: sourcePlatform });
-    if (gridWorkerId) builder = builder.andWhere("(e.reporterId = :gwid OR e.assigneeId = :gwid)", { gwid: gridWorkerId });
-    if (startDate) builder = builder.andWhere("e.createdAt >= :sd", { sd: new Date(startDate as string) });
-    if (endDate) builder = builder.andWhere("e.createdAt <= :ed", { ed: new Date(endDate + "T23:59:59") });
-
-    builder = builder.orderBy("e.createdAt", "DESC");
+    const builder = buildExportQueryBuilder(eventRepo, req.query);
     const events = (await builder.getMany()) as any[];
+
+    const filename = `events_${dayjs().format("YYYYMMDD_HHmmss")}.csv`;
+    const exportTime = new Date();
+
+    if (format === "meta") {
+      return success(res, {
+        filename,
+        exportTime,
+        recordCount: events.length,
+        filters: { communityId, gridAreaId, eventType, status, isOverdue, isRepeated, gridWorkerId, startDate, endDate, sourcePlatform },
+      }, "Export task metadata retrieved successfully");
+    }
 
     const communityCache = new Map<string, string>();
     const gridCache = new Map<string, string>();
@@ -276,7 +296,7 @@ router.get("/events/export", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STR
     const headers = [
       "事件编号", "标题", "社区", "网格", "事件类型", "事件等级",
       "状态", "上报人", "处理人", "是否超时", "是否重复",
-      "创建时间", "派单时间", "完成时间", "截止时间",
+      "来源平台", "创建时间", "派单时间", "完成时间", "截止时间",
     ];
 
     const rows = events.map((e: any) => [
@@ -291,6 +311,7 @@ router.get("/events/export", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STR
       e.assigneeName || "",
       e.isOverdue ? "是" : "否",
       e.isRepeated ? "是" : "否",
+      e.source || "",
       fmt(e.createdAt),
       fmt(e.assignedAt),
       fmt(e.completedAt),
@@ -300,7 +321,6 @@ router.get("/events/export", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STR
     const csv = [headers, ...rows].map(r => r.map(csvEscape).join(",")).join("\n");
     const bom = "\uFEFF";
 
-    const filename = `events_${dayjs().format("YYYYMMDD_HHmmss")}.csv`;
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(bom + csv);

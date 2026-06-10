@@ -370,6 +370,15 @@ router.get("/area-quality", authMiddleware, async (req: Request, res: Response, 
       return b;
     };
 
+    const visitFilterBuilder = (baseWhere: any) => {
+      let b = visitRepo.createQueryBuilder("v");
+      if (baseWhere.communityId) b = b.where("v.communityId = :cid", { cid: baseWhere.communityId });
+      if (baseWhere.gridAreaId) b = b.andWhere("v.gridAreaId = :gid", { gid: baseWhere.gridAreaId });
+      if (startDate) b = b.andWhere("v.visitTime >= :sd", { sd: new Date(startDate) });
+      if (endDate) b = b.andWhere("v.visitTime <= :ed", { ed: new Date(endDate + "T23:59:59") });
+      return b;
+    };
+
     if (level === "community") {
       const where: any = { isActive: true };
       if (communityId) where.id = communityId;
@@ -392,10 +401,10 @@ router.get("/area-quality", authMiddleware, async (req: Request, res: Response, 
         const allResidents = await residentRepo.count({ where: { communityId: c.id } });
         const allGrids = await gridRepo.count({ where: { communityId: c.id } });
 
-        const communityVisits = await visitRepo.find({ where: { communityId: c.id } });
+        const communityVisits = (await visitFilterBuilder({ communityId: c.id }).getMany()) as any[];
         const visitedResidentIds = new Set<string>();
         const visitedGridIds = new Set<string>();
-        for (const v of communityVisits as any) {
+        for (const v of communityVisits) {
           if (v.residentId) visitedResidentIds.add(v.residentId);
           if (v.gridAreaId) visitedGridIds.add(v.gridAreaId);
         }
@@ -442,9 +451,9 @@ router.get("/area-quality", authMiddleware, async (req: Request, res: Response, 
         const repeated = await repeatedBuilder.getCount();
 
         const allResidents = await residentRepo.count({ where: { gridAreaId: g.id } });
-        const gridVisits = await visitRepo.find({ where: { gridAreaId: g.id } });
+        const gridVisits = (await visitFilterBuilder({ gridAreaId: g.id }).getMany()) as any[];
         const visitedResidentIds = new Set<string>();
-        for (const v of gridVisits as any) {
+        for (const v of gridVisits) {
           if (v.residentId) visitedResidentIds.add(v.residentId);
         }
         const visitedResidents = visitedResidentIds.size;
@@ -477,6 +486,93 @@ router.get("/area-quality", authMiddleware, async (req: Request, res: Response, 
       filters: { communityId, eventType, startDate, endDate },
       list: result,
     }, "Area quality comparison retrieved successfully");
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/area-quality-trend", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventRepo = AppDataSource.getRepository(Event);
+    const visitRepo = AppDataSource.getRepository(VisitRecord);
+    const residentRepo = AppDataSource.getRepository(Resident);
+
+    const communityId = req.query.communityId as string | undefined;
+    const gridAreaId = req.query.gridAreaId as string | undefined;
+    const eventType = req.query.eventType as string | undefined;
+    const days = Number(req.query.days) || 7;
+
+    if (!communityId && !gridAreaId) {
+      throw new AppError("communityId or gridAreaId is required for trend query", 400, 400);
+    }
+
+    const allResidents = gridAreaId
+      ? await residentRepo.count({ where: { gridAreaId } })
+      : communityId
+        ? await residentRepo.count({ where: { communityId } })
+        : 0;
+
+    const result: any[] = [];
+
+    for (let i = days - 1; i >= 0; i--) {
+      const date = dayjs().subtract(i, "day");
+      const startOfDay = date.startOf("day").toDate();
+      const endOfDay = date.endOf("day").toDate();
+
+      let eventBase = eventRepo.createQueryBuilder("e")
+        .where("e.createdAt >= :start", { start: startOfDay })
+        .andWhere("e.createdAt <= :end", { end: endOfDay });
+      if (communityId) eventBase = eventBase.andWhere("e.communityId = :cid", { cid: communityId });
+      if (gridAreaId) eventBase = eventBase.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+      if (eventType) eventBase = eventBase.andWhere("e.eventType = :et", { et: eventType });
+
+      const dayTotal = await eventBase.getCount();
+
+      let completedBase = eventRepo.createQueryBuilder("e")
+        .where("e.completedAt >= :start", { start: startOfDay })
+        .andWhere("e.completedAt <= :end", { end: endOfDay })
+        .andWhere("(e.status = :cs OR e.status = :cls)", { cs: EVENT_STATUS.COMPLETED, cls: EVENT_STATUS.CLOSED });
+      if (communityId) completedBase = completedBase.andWhere("e.communityId = :cid", { cid: communityId });
+      if (gridAreaId) completedBase = completedBase.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+      if (eventType) completedBase = completedBase.andWhere("e.eventType = :et", { et: eventType });
+      const dayCompleted = await completedBase.getCount();
+
+      let overdueBase = eventRepo.createQueryBuilder("e")
+        .where("e.createdAt >= :start", { start: startOfDay })
+        .andWhere("e.createdAt <= :end", { end: endOfDay })
+        .andWhere("e.isOverdue = :io", { io: true });
+      if (communityId) overdueBase = overdueBase.andWhere("e.communityId = :cid", { cid: communityId });
+      if (gridAreaId) overdueBase = overdueBase.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+      if (eventType) overdueBase = overdueBase.andWhere("e.eventType = :et", { et: eventType });
+      const dayOverdue = await overdueBase.getCount();
+
+      let visitBase = visitRepo.createQueryBuilder("v")
+        .where("v.visitTime >= :start", { start: startOfDay })
+        .andWhere("v.visitTime <= :end", { end: endOfDay });
+      if (communityId) visitBase = visitBase.andWhere("v.communityId = :cid", { cid: communityId });
+      if (gridAreaId) visitBase = visitBase.andWhere("v.gridAreaId = :gid", { gid: gridAreaId });
+      const dayVisits = (await visitBase.getMany()) as any[];
+      const dayVisitedResidents = new Set(dayVisits.filter(v => v.residentId).map(v => v.residentId!)).size;
+
+      result.push({
+        date: date.format("YYYY-MM-DD"),
+        totalEvents: dayTotal,
+        completedEvents: dayCompleted,
+        completionRate: dayTotal > 0 ? Math.round(dayCompleted / dayTotal * 100) : 0,
+        overdueEvents: dayOverdue,
+        overdueRate: dayTotal > 0 ? Math.round(dayOverdue / dayTotal * 100) : 0,
+        visitedResidents: dayVisitedResidents,
+        residentCoverageRate: allResidents > 0 ? Math.round(dayVisitedResidents / allResidents * 100) : 0,
+      });
+    }
+
+    success(res, {
+      area: gridAreaId ? { gridAreaId } : { communityId },
+      days,
+      eventType,
+      totalResidents: allResidents,
+      trend: result,
+    }, "Area quality trend retrieved successfully");
   } catch (err) {
     next(err);
   }
