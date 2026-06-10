@@ -7,6 +7,8 @@ import { Event } from "../entities/Event";
 import { EventFlow } from "../entities/EventFlow";
 import { Notification } from "../entities/Notification";
 import { User } from "../entities/User";
+import { Community } from "../entities/Community";
+import { GridArea } from "../entities/GridArea";
 import { success, AppError } from "../utils/response";
 import { authMiddleware, requireRoles } from "../middlewares/auth";
 import { ROLES, EVENT_STATUS, EVENT_TYPES } from "../config";
@@ -214,6 +216,94 @@ router.get("/events", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROLES.A
       page: Number(page),
       pageSize: Number(pageSize),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/events/export", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET, ROLES.COMMUNITY, ROLES.UPPER_PLATFORM), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventRepo = AppDataSource.getRepository(Event);
+    const communityRepo = AppDataSource.getRepository(Community);
+    const gridRepo = AppDataSource.getRepository(GridArea);
+
+    const { communityId, gridAreaId, eventType, status, isOverdue, isRepeated, gridWorkerId, startDate, endDate, sourcePlatform } = req.query;
+
+    let builder = eventRepo.createQueryBuilder("e");
+
+    if (communityId) builder = builder.where("e.communityId = :cid", { cid: communityId });
+    if (gridAreaId) builder = builder.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+    if (eventType) builder = builder.andWhere("e.eventType = :et", { et: eventType });
+    if (status) builder = builder.andWhere("e.status = :st", { st: status });
+    if (isOverdue !== undefined) builder = builder.andWhere("e.isOverdue = :io", { io: isOverdue === "true" });
+    if (isRepeated !== undefined) builder = builder.andWhere("e.isRepeated = :ir", { ir: isRepeated === "true" });
+    if (sourcePlatform) builder = builder.andWhere("e.sourcePlatform = :sp", { sp: sourcePlatform });
+    if (gridWorkerId) builder = builder.andWhere("(e.reporterId = :gwid OR e.assigneeId = :gwid)", { gwid: gridWorkerId });
+    if (startDate) builder = builder.andWhere("e.createdAt >= :sd", { sd: new Date(startDate as string) });
+    if (endDate) builder = builder.andWhere("e.createdAt <= :ed", { ed: new Date(endDate + "T23:59:59") });
+
+    builder = builder.orderBy("e.createdAt", "DESC");
+    const events = (await builder.getMany()) as any[];
+
+    const communityCache = new Map<string, string>();
+    const gridCache = new Map<string, string>();
+
+    const allCommunities = (await communityRepo.find()) as any[];
+    for (const c of allCommunities) communityCache.set(c.id, c.name);
+    const allGrids = (await gridRepo.find()) as any[];
+    for (const g of allGrids) gridCache.set(g.id, g.name);
+
+    const fmt = (d: any) => d ? dayjs(d).format("YYYY-MM-DD HH:mm:ss") : "";
+    const csvEscape = (s: any) => {
+      const v = s === null || s === undefined ? "" : String(s);
+      if (v.includes(",") || v.includes("\"") || v.includes("\n")) {
+        return `"${v.replace(/"/g, '""')}"`;
+      }
+      return v;
+    };
+
+    const statusMap: any = {
+      pending: "待派单",
+      assigned: "已派单",
+      processing: "处理中",
+      feedback: "待反馈",
+      revisiting: "回访中",
+      completed: "已完成",
+      closed: "已结案",
+      overdue: "已超时",
+    };
+
+    const headers = [
+      "事件编号", "标题", "社区", "网格", "事件类型", "事件等级",
+      "状态", "上报人", "处理人", "是否超时", "是否重复",
+      "创建时间", "派单时间", "完成时间", "截止时间",
+    ];
+
+    const rows = events.map((e: any) => [
+      e.eventNo,
+      e.title,
+      communityCache.get(e.communityId) || "",
+      gridCache.get(e.gridAreaId) || "",
+      e.eventType,
+      e.priority || "",
+      statusMap[e.status] || e.status,
+      e.reporterName || "",
+      e.assigneeName || "",
+      e.isOverdue ? "是" : "否",
+      e.isRepeated ? "是" : "否",
+      fmt(e.createdAt),
+      fmt(e.assignedAt),
+      fmt(e.completedAt),
+      fmt(e.deadline),
+    ]);
+
+    const csv = [headers, ...rows].map(r => r.map(csvEscape).join(",")).join("\n");
+    const bom = "\uFEFF";
+
+    const filename = `events_${dayjs().format("YYYYMMDD_HHmmss")}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(bom + csv);
   } catch (err) {
     next(err);
   }

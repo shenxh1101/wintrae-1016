@@ -714,4 +714,68 @@ router.post("/:id/return", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREE
   }
 });
 
+const urgeSchema = z.object({
+  content: z.string().min(1, "Urge content is required"),
+});
+
+router.post("/:id/urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET, ROLES.COMMUNITY), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = urgeSchema.safeParse(req.body);
+    if (!result.success) {
+      return AppError.throwValidationError(result.error);
+    }
+    const { content } = result.data;
+
+    const eventRepo = AppDataSource.getRepository(Event);
+    const flowRepo = AppDataSource.getRepository(EventFlow);
+    const notifRepo = AppDataSource.getRepository(Notification);
+
+    const event = await eventRepo.findOne({ where: { id: req.params.id } });
+    if (!event) return AppError.throwNotFound("Event not found");
+
+    if (event.status === EVENT_STATUS.COMPLETED || event.status === EVENT_STATUS.CLOSED) {
+      throw new AppError("Completed or closed events cannot be urged", 400, 400);
+    }
+
+    const authUser = req.user!;
+    const handlerId = event.assigneeId;
+
+    if (handlerId) {
+      const notif = notifRepo.create({
+        userId: handlerId,
+        type: "urge",
+        title: "Event handling urged",
+        content: `Urgent reminder for event "${event.title}" (${event.eventNo}): ${content}`,
+        eventId: event.id,
+        isRead: false,
+      });
+      await notifRepo.save(notif);
+    }
+
+    await flowRepo.save(flowRepo.create({
+      eventId: event.id,
+      action: "urge",
+      fromStatus: event.status,
+      toStatus: event.status,
+      operatorId: authUser.userId,
+      operatorName: authUser.realName,
+      remark: content,
+    }));
+
+    const flows = await flowRepo.find({
+      where: { eventId: event.id },
+      order: { createdAt: "ASC" },
+    });
+
+    success(res, {
+      event: { id: event.id, status: event.status, eventNo: event.eventNo },
+      urged: true,
+      urgedAt: new Date(),
+      flows,
+    }, "Event urged successfully, notification sent to handler");
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

@@ -284,7 +284,7 @@ router.get("/visits-trend", authMiddleware, async (req: Request, res: Response, 
         .andWhere("v.visitTime <= :end", { end: endOfDay });
       if (communityId) totalBuilder = totalBuilder.andWhere("v.communityId = :cid", { cid: communityId });
       if (gridAreaId) totalBuilder = totalBuilder.andWhere("v.gridAreaId = :gid", { gid: gridAreaId });
-      if (gridWorkerId) totalBuilder = totalBuilder.andWhere("v.workerId = :gwid", { gwid: gridWorkerId });
+      if (gridWorkerId) totalBuilder = totalBuilder.andWhere("v.visitorId = :gwid", { gwid: gridWorkerId });
       const count = await totalBuilder.getCount();
 
       let issueBuilder = visitRepo.createQueryBuilder("v")
@@ -293,7 +293,7 @@ router.get("/visits-trend", authMiddleware, async (req: Request, res: Response, 
         .andWhere("v.hasIssue = :hi", { hi: true });
       if (communityId) issueBuilder = issueBuilder.andWhere("v.communityId = :cid", { cid: communityId });
       if (gridAreaId) issueBuilder = issueBuilder.andWhere("v.gridAreaId = :gid", { gid: gridAreaId });
-      if (gridWorkerId) issueBuilder = issueBuilder.andWhere("v.workerId = :gwid", { gwid: gridWorkerId });
+      if (gridWorkerId) issueBuilder = issueBuilder.andWhere("v.visitorId = :gwid", { gwid: gridWorkerId });
       const issueCount = await issueBuilder.getCount();
 
       result.push({
@@ -339,6 +339,144 @@ router.get("/communities-ranking", authMiddleware, requireRoles(ROLES.ADMIN, ROL
     result.sort((a, b) => b.completionRate - a.completionRate || b.totalEvents - a.totalEvents);
 
     success(res, result, "Community ranking statistics retrieved successfully");
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/area-quality", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventRepo = AppDataSource.getRepository(Event);
+    const visitRepo = AppDataSource.getRepository(VisitRecord);
+    const communityRepo = AppDataSource.getRepository(Community);
+    const gridRepo = AppDataSource.getRepository(GridArea);
+    const residentRepo = AppDataSource.getRepository(Resident);
+
+    const level = (req.query.level as string) || "community";
+    const communityId = req.query.communityId as string | undefined;
+    const eventType = req.query.eventType as string | undefined;
+    const startDate = req.query.startDate as string | undefined;
+    const endDate = req.query.endDate as string | undefined;
+
+    const result: any[] = [];
+
+    const eventFilterBuilder = (baseWhere: any) => {
+      let b = eventRepo.createQueryBuilder("e");
+      if (baseWhere.communityId) b = b.where("e.communityId = :cid", { cid: baseWhere.communityId });
+      if (baseWhere.gridAreaId) b = b.andWhere("e.gridAreaId = :gid", { gid: baseWhere.gridAreaId });
+      if (eventType) b = b.andWhere("e.eventType = :et", { et: eventType });
+      if (startDate) b = b.andWhere("e.createdAt >= :sd", { sd: new Date(startDate) });
+      if (endDate) b = b.andWhere("e.createdAt <= :ed", { ed: new Date(endDate + "T23:59:59") });
+      return b;
+    };
+
+    if (level === "community") {
+      const where: any = { isActive: true };
+      if (communityId) where.id = communityId;
+      const communities = await communityRepo.find({ where });
+
+      for (const c of communities as any) {
+        let base = eventFilterBuilder({ communityId: c.id });
+        const total = await base.getCount();
+
+        let completedBuilder = eventFilterBuilder({ communityId: c.id })
+          .andWhere("(e.status = :cs OR e.status = :cls)", { cs: EVENT_STATUS.COMPLETED, cls: EVENT_STATUS.CLOSED });
+        const completed = await completedBuilder.getCount();
+
+        let overdueBuilder = eventFilterBuilder({ communityId: c.id }).andWhere("e.isOverdue = :io", { io: true });
+        const overdue = await overdueBuilder.getCount();
+
+        let repeatedBuilder = eventFilterBuilder({ communityId: c.id }).andWhere("e.isRepeated = :ir", { ir: true });
+        const repeated = await repeatedBuilder.getCount();
+
+        const allResidents = await residentRepo.count({ where: { communityId: c.id } });
+        const allGrids = await gridRepo.count({ where: { communityId: c.id } });
+
+        const communityVisits = await visitRepo.find({ where: { communityId: c.id } });
+        const visitedResidentIds = new Set<string>();
+        const visitedGridIds = new Set<string>();
+        for (const v of communityVisits as any) {
+          if (v.residentId) visitedResidentIds.add(v.residentId);
+          if (v.gridAreaId) visitedGridIds.add(v.gridAreaId);
+        }
+        const visitedResidents = visitedResidentIds.size;
+        const visitedGrids = visitedGridIds.size;
+
+        result.push({
+          level: "community",
+          id: c.id,
+          name: c.name,
+          code: c.code,
+          totalEvents: total,
+          completedEvents: completed,
+          completionRate: total > 0 ? Math.round(completed / total * 100) : 0,
+          overdueEvents: overdue,
+          overdueRate: total > 0 ? Math.round(overdue / total * 100) : 0,
+          repeatedEvents: repeated,
+          repeatedRate: total > 0 ? Math.round(repeated / total * 100) : 0,
+          residents: allResidents,
+          visitedResidents,
+          residentCoverageRate: allResidents > 0 ? Math.round(visitedResidents / allResidents * 100) : 0,
+          gridAreas: allGrids,
+          visitedGridAreas: visitedGrids,
+          gridCoverageRate: allGrids > 0 ? Math.round(visitedGrids / allGrids * 100) : 0,
+        });
+      }
+    } else {
+      const gridWhere: any = {};
+      if (communityId) gridWhere.communityId = communityId;
+      const grids = await gridRepo.find({ where: gridWhere });
+
+      for (const g of grids as any) {
+        let base = eventFilterBuilder({ gridAreaId: g.id });
+        const total = await base.getCount();
+
+        let completedBuilder = eventFilterBuilder({ gridAreaId: g.id })
+          .andWhere("(e.status = :cs OR e.status = :cls)", { cs: EVENT_STATUS.COMPLETED, cls: EVENT_STATUS.CLOSED });
+        const completed = await completedBuilder.getCount();
+
+        let overdueBuilder = eventFilterBuilder({ gridAreaId: g.id }).andWhere("e.isOverdue = :io", { io: true });
+        const overdue = await overdueBuilder.getCount();
+
+        let repeatedBuilder = eventFilterBuilder({ gridAreaId: g.id }).andWhere("e.isRepeated = :ir", { ir: true });
+        const repeated = await repeatedBuilder.getCount();
+
+        const allResidents = await residentRepo.count({ where: { gridAreaId: g.id } });
+        const gridVisits = await visitRepo.find({ where: { gridAreaId: g.id } });
+        const visitedResidentIds = new Set<string>();
+        for (const v of gridVisits as any) {
+          if (v.residentId) visitedResidentIds.add(v.residentId);
+        }
+        const visitedResidents = visitedResidentIds.size;
+
+        result.push({
+          level: "grid",
+          id: g.id,
+          name: g.name,
+          code: g.code,
+          communityId: g.communityId,
+          totalEvents: total,
+          completedEvents: completed,
+          completionRate: total > 0 ? Math.round(completed / total * 100) : 0,
+          overdueEvents: overdue,
+          overdueRate: total > 0 ? Math.round(overdue / total * 100) : 0,
+          repeatedEvents: repeated,
+          repeatedRate: total > 0 ? Math.round(repeated / total * 100) : 0,
+          residents: allResidents,
+          visitedResidents,
+          residentCoverageRate: allResidents > 0 ? Math.round(visitedResidents / allResidents * 100) : 0,
+        });
+      }
+    }
+
+    result.sort((a, b) => b.totalEvents - a.totalEvents || a.overdueRate - b.overdueRate);
+
+    success(res, {
+      level,
+      total: result.length,
+      filters: { communityId, eventType, startDate, endDate },
+      list: result,
+    }, "Area quality comparison retrieved successfully");
   } catch (err) {
     next(err);
   }
