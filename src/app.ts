@@ -17,6 +17,7 @@ import notificationRoutes from "./routes/notifications";
 import attachmentRoutes from "./routes/attachments";
 import statisticsRoutes from "./routes/statistics";
 import upperPlatformRoutes from "./routes/upperPlatform";
+import exportTaskRoutes from "./routes/exportTasks";
 import { startScheduledTasks, checkOverdueTasks } from "./scheduler/tasks";
 
 async function bootstrap() {
@@ -57,6 +58,7 @@ async function bootstrap() {
         attachments: "/api/attachments",
         statistics: "/api/statistics",
         upperPlatform: "/api/upper-platform",
+        exportTasks: "/api/export-tasks",
       },
       health: "/health",
     });
@@ -73,6 +75,7 @@ async function bootstrap() {
   app.use("/api/attachments", attachmentRoutes);
   app.use("/api/statistics", statisticsRoutes);
   app.use("/api/upper-platform", upperPlatformRoutes);
+  app.use("/api/export-tasks", exportTaskRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

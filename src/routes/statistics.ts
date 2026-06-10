@@ -609,4 +609,93 @@ router.get("/residents-by-tag", authMiddleware, async (req: Request, res: Respon
   }
 });
 
+router.get("/area-quality-trend/drilldown", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventRepo = AppDataSource.getRepository(Event);
+    const visitRepo = AppDataSource.getRepository(VisitRecord);
+
+    const communityId = req.query.communityId as string | undefined;
+    const gridAreaId = req.query.gridAreaId as string | undefined;
+    const metric = (req.query.metric as string) || "completed";
+    const date = req.query.date as string | undefined;
+
+    if (!date) throw new AppError("date (YYYY-MM-DD) is required", 400, 400);
+    if (!communityId && !gridAreaId) throw new AppError("communityId or gridAreaId is required", 400, 400);
+
+    const d = dayjs(date);
+    const startOfDay = d.startOf("day").toDate();
+    const endOfDay = d.endOf("day").toDate();
+
+    const applyArea = (b: any, alias: string) => {
+      if (communityId) b = b.andWhere(`${alias}.communityId = :cid`, { cid: communityId });
+      if (gridAreaId) b = b.andWhere(`${alias}.gridAreaId = :gid`, { gid: gridAreaId });
+      return b;
+    };
+
+    if (metric === "visitedResidents" || metric === "residentCoverageRate" || metric === "visits") {
+      let vb = visitRepo.createQueryBuilder("v")
+        .where("v.visitTime >= :start", { start: startOfDay })
+        .andWhere("v.visitTime <= :end", { end: endOfDay });
+      vb = applyArea(vb, "v");
+      const visits = await vb.orderBy("v.visitTime", "DESC").getMany();
+
+      const residentIds = new Set<string>();
+      for (const v of visits as any[]) {
+        if (v.residentId) residentIds.add(v.residentId);
+      }
+      const visitedResidents = residentIds.size;
+
+      return success(res, {
+        metric,
+        date,
+        totalVisits: visits.length,
+        visitedResidents,
+        communityId,
+        gridAreaId,
+        visits,
+      }, "Visit drilldown data retrieved successfully");
+    }
+
+    let events: any[] = [];
+    let baseDateField = "createdAt";
+
+    if (metric === "completed" || metric === "completionRate") {
+      baseDateField = "completedAt";
+      let b = eventRepo.createQueryBuilder("e")
+        .where("e.completedAt >= :start", { start: startOfDay })
+        .andWhere("e.completedAt <= :end", { end: endOfDay })
+        .andWhere("(e.status = :cs OR e.status = :cls)", { cs: EVENT_STATUS.COMPLETED, cls: EVENT_STATUS.CLOSED });
+      b = applyArea(b, "e");
+      events = await b.orderBy("e.completedAt", "DESC").getMany();
+    } else if (metric === "overdue" || metric === "overdueRate") {
+      baseDateField = "createdAt";
+      let b = eventRepo.createQueryBuilder("e")
+        .where("e.createdAt >= :start", { start: startOfDay })
+        .andWhere("e.createdAt <= :end", { end: endOfDay })
+        .andWhere("e.isOverdue = :io", { io: true });
+      b = applyArea(b, "e");
+      events = await b.orderBy("e.createdAt", "DESC").getMany();
+    } else {
+      baseDateField = "createdAt";
+      let b = eventRepo.createQueryBuilder("e")
+        .where("e.createdAt >= :start", { start: startOfDay })
+        .andWhere("e.createdAt <= :end", { end: endOfDay });
+      b = applyArea(b, "e");
+      events = await b.orderBy("e.createdAt", "DESC").getMany();
+    }
+
+    success(res, {
+      metric,
+      date,
+      baseDateField,
+      communityId,
+      gridAreaId,
+      total: events.length,
+      events,
+    }, "Event drilldown data retrieved successfully");
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

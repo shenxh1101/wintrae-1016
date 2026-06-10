@@ -388,44 +388,50 @@ router.get("/sync-status", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, RO
   try {
     const eventRepo = AppDataSource.getRepository(Event);
 
-    const totalSynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .getCount();
+    const sourcePlatform = req.query.sourcePlatform as string | undefined;
+    const communityId = req.query.communityId as string | undefined;
+    const gridWorkerId = req.query.gridWorkerId as string | undefined;
+    const isOverdue = req.query.isOverdue as string | undefined;
 
-    const pendingSynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .andWhere("e.status = :status", { status: EVENT_STATUS.PENDING })
-      .getCount();
+    const buildBaseQuery = (alias: string = "e") => {
+      let b = eventRepo.createQueryBuilder(alias).where(`${alias}.source IS NOT NULL`);
+      if (sourcePlatform) b = b.andWhere(`${alias}.source = :sp`, { sp: sourcePlatform });
+      if (communityId) b = b.andWhere(`${alias}.communityId = :cid`, { cid: communityId });
+      if (gridWorkerId) b = b.andWhere(`(${alias}.reporterId = :gwid OR ${alias}.assigneeId = :gwid)`, { gwid: gridWorkerId });
+      if (isOverdue !== undefined) b = b.andWhere(`${alias}.isOverdue = :io`, { io: isOverdue === "true" });
+      return b;
+    };
 
-    const processingSynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .andWhere("e.status IN (:...statuses)", {
-        statuses: [EVENT_STATUS.ASSIGNED, EVENT_STATUS.PROCESSING, EVENT_STATUS.FEEDBACK, EVENT_STATUS.REVISITING],
-      })
-      .getCount();
-
-    const completedSynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .andWhere("e.status IN (:...statuses)", {
-        statuses: [EVENT_STATUS.COMPLETED, EVENT_STATUS.CLOSED],
-      })
-      .getCount();
-
-    const overdueSynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .andWhere("e.isOverdue = :overdue", { overdue: true })
-      .getCount();
+    const totalSynced = await buildBaseQuery().getCount();
+    const pendingSynced = await buildBaseQuery().andWhere("e.status = :status", { status: EVENT_STATUS.PENDING }).getCount();
+    const processingSynced = await buildBaseQuery().andWhere("e.status IN (:...statuses)", {
+      statuses: [EVENT_STATUS.ASSIGNED, EVENT_STATUS.PROCESSING, EVENT_STATUS.FEEDBACK, EVENT_STATUS.REVISITING],
+    }).getCount();
+    const completedSynced = await buildBaseQuery().andWhere("e.status IN (:...statuses)", {
+      statuses: [EVENT_STATUS.COMPLETED, EVENT_STATUS.CLOSED],
+    }).getCount();
+    const overdueSynced = await buildBaseQuery().andWhere("e.isOverdue = :overdue", { overdue: true }).getCount();
 
     const today = dayjs();
     const todayStart = today.startOf("day").toDate();
     const todayEnd = today.endOf("day").toDate();
-
-    const todaySynced = await eventRepo.createQueryBuilder("e")
-      .where("e.reportedFrom IS NOT NULL")
-      .andWhere("e.createdAt >= :start AND e.createdAt <= :end", { start: todayStart, end: todayEnd })
+    const todaySynced = await buildBaseQuery()
+      .andWhere("e.createdAt >= :start", { start: todayStart })
+      .andWhere("e.createdAt <= :end", { end: todayEnd })
       .getCount();
 
+    const allSynced = (await buildBaseQuery().select(["e.source"]).getMany()) as any[];
+    const sourceGroups = new Map<string, number>();
+    for (const e of allSynced) {
+      const key = e.source || "unknown";
+      sourceGroups.set(key, (sourceGroups.get(key) || 0) + 1);
+    }
+    const bySource: any[] = [];
+    sourceGroups.forEach((count, source) => bySource.push({ source, count }));
+    bySource.sort((a, b) => b.count - a.count);
+
     success(res, {
+      filters: { sourcePlatform, communityId, gridWorkerId, isOverdue },
       total: totalSynced,
       pending: pendingSynced,
       processing: processingSynced,
@@ -434,6 +440,7 @@ router.get("/sync-status", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, RO
       overdue: overdueSynced,
       todaySynced,
       syncRate: totalSynced > 0 ? Math.round(completedSynced / totalSynced * 100) : 0,
+      bySource,
     }, "Sync status retrieved successfully");
   } catch (err) {
     next(err);
@@ -478,7 +485,7 @@ router.post("/events/batch-sync", authMiddleware, requireRoles(ROLES.UPPER_PLATF
           reporterId: req.user!.userId,
           reporterName: validated.reporterName || req.user!.realName,
           reporterPhone: validated.reporterPhone,
-          reportedFrom: validated.sourcePlatform,
+          source: validated.sourcePlatform,
           communityId: validated.communityId,
           gridAreaId: validated.gridAreaId,
           longitude: validated.longitude,

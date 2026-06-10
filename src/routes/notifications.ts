@@ -44,14 +44,38 @@ router.get("/", authMiddleware, async (req: Request, res: Response, next: NextFu
 router.get("/unread-count", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const notifRepo = AppDataSource.getRepository(Notification);
-    const count = await notifRepo.count({
+    const allUnread = await notifRepo.find({
       where: {
         userId: req.user!.userId,
         isRead: false,
       },
     });
 
-    success(res, { count }, "Unread count retrieved successfully");
+    const byType: Record<string, number> = {
+      urge: 0,
+      overdue: 0,
+      deadline_approaching: 0,
+      system: 0,
+      other: 0,
+    };
+    for (const n of allUnread as any[]) {
+      const t = n.type || "other";
+      if (byType.hasOwnProperty(t)) {
+        byType[t]++;
+      } else {
+        byType.other++;
+      }
+    }
+
+    success(res, {
+      total: allUnread.length,
+      byType,
+      urge: byType.urge,
+      overdue: byType.overdue,
+      deadlineApproaching: byType.deadline_approaching,
+      system: byType.system,
+      count: allUnread.length,
+    }, "Unread count retrieved successfully");
   } catch (err) {
     next(err);
   }
@@ -105,12 +129,16 @@ router.post("/:id/read", authMiddleware, async (req: Request, res: Response, nex
 router.post("/read-all", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const notifRepo = AppDataSource.getRepository(Notification);
-    const notifications = await notifRepo.find({
-      where: {
-        userId: req.user!.userId,
-        isRead: false,
-      },
-    });
+    const type = req.body && req.body.type ? req.body.type : undefined;
+    const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids : undefined;
+
+    let where: any = { userId: req.user!.userId, isRead: false };
+    if (type) where.type = type;
+
+    let notifications = await notifRepo.find({ where });
+    if (ids) {
+      notifications = notifications.filter((n: any) => ids.includes(n.id));
+    }
 
     const now = new Date();
     for (const n of notifications) {
@@ -119,7 +147,10 @@ router.post("/read-all", authMiddleware, async (req: Request, res: Response, nex
     }
     await notifRepo.save(notifications);
 
-    success(res, { count: notifications.length }, "All notifications marked as read successfully");
+    success(res, {
+      count: notifications.length,
+      type: type || "all",
+    }, "Notifications marked as read successfully");
   } catch (err) {
     next(err);
   }

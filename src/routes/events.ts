@@ -811,4 +811,154 @@ router.post("/:id/urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET,
   }
 });
 
+const batchUrgeSchema = z.object({
+  eventIds: z.array(z.string()).min(1, "At least one event ID is required"),
+  content: z.string().min(1, "Urge content is required"),
+});
+
+router.post("/batch-urge", authMiddleware, requireRoles(ROLES.ADMIN, ROLES.STREET, ROLES.COMMUNITY), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = batchUrgeSchema.safeParse(req.body);
+    if (!result.success) return AppError.throwValidationError(result.error);
+    const { eventIds, content } = result.data;
+    const authUser = req.user!;
+
+    const eventRepo = AppDataSource.getRepository(Event);
+    const flowRepo = AppDataSource.getRepository(EventFlow);
+    const notifRepo = AppDataSource.getRepository(Notification);
+    const userRepo = AppDataSource.getRepository(User);
+
+    const userCache = new Map<string, any>();
+    const results: any[] = [];
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const eventId of eventIds) {
+      try {
+        const event = await eventRepo.findOne({ where: { id: eventId } });
+        if (!event) throw new AppError("Event not found");
+        if (event.status === EVENT_STATUS.COMPLETED || event.status === EVENT_STATUS.CLOSED) throw new AppError("Event completed or closed");
+        if (!event.assigneeId) throw new AppError("No assignee - must assign first");
+
+        const handler = userCache.has(event.assigneeId)
+          ? userCache.get(event.assigneeId)
+          : await userRepo.findOne({ where: { id: event.assigneeId } });
+        if (handler) userCache.set(event.assigneeId, handler);
+        const handlerName = handler ? (handler.realName || handler.username) : "";
+
+        const notif = notifRepo.create({
+          userId: event.assigneeId,
+          type: "urge",
+          title: "Event handling urged",
+          content: `Urgent reminder for event "${event.title}" (${(event as any).eventNo}): ${content}`,
+          eventId: event.id,
+          isRead: false,
+        });
+        await notifRepo.save(notif);
+
+        await flowRepo.save(flowRepo.create({
+          eventId: event.id,
+          action: "urge",
+          fromStatus: event.status,
+          toStatus: event.status,
+          operatorId: authUser.userId,
+          operatorName: authUser.realName,
+          remark: content,
+        }));
+
+        results.push({ eventId, eventNo: (event as any).eventNo, success: true, targetUserId: event.assigneeId, targetUserName: handlerName });
+        successCount++;
+      } catch (err: any) {
+        results.push({ eventId, success: false, reason: err && err.message ? err.message : String(err) });
+        failCount++;
+      }
+    }
+
+    success(res, {
+      total: eventIds.length,
+      successCount,
+      failCount,
+      results,
+    }, `Batch urge completed: ${successCount} success, ${failCount} failed`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/urge-history", authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventRepo = AppDataSource.getRepository(Event);
+    const flowRepo = AppDataSource.getRepository(EventFlow);
+    const notifRepo = AppDataSource.getRepository(Notification);
+    const userRepo = AppDataSource.getRepository(User);
+
+    const event = await eventRepo.findOne({ where: { id: req.params.id } });
+    if (!event) return AppError.throwNotFound("Event not found");
+
+    const flows = await flowRepo.find({
+      where: { eventId: event.id, action: "urge" },
+      order: { createdAt: "ASC" },
+    });
+
+    const notifications = await notifRepo.find({
+      where: { eventId: event.id, type: "urge" },
+      order: { createdAt: "ASC" },
+    });
+
+    const userCache = new Map<string, any>();
+    for (const f of flows) {
+      const ff = f as any;
+      if (ff.operatorId && !userCache.has(ff.operatorId)) {
+        const u = await userRepo.findOne({ where: { id: ff.operatorId } });
+        if (u) userCache.set(ff.operatorId, u);
+      }
+    }
+    for (const n of notifications) {
+      const nn = n as any;
+      if (nn.userId && !userCache.has(nn.userId)) {
+        const u = await userRepo.findOne({ where: { id: nn.userId } });
+        if (u) userCache.set(nn.userId, u);
+      }
+    }
+
+    const records = flows.map((flow: any, idx: number) => {
+      const matchedNotif = notifications.find((n: any) => {
+        const nt = new Date(n.createdAt).getTime();
+        const ft = new Date(flow.createdAt).getTime();
+        return Math.abs(nt - ft) < 5000;
+      }) as any;
+
+      const targetUser = matchedNotif ? userCache.get(matchedNotif.userId) : null;
+      const operatorUser = userCache.get(flow.operatorId);
+
+      return {
+        id: flow.id,
+        eventId: event.id,
+        eventNo: (event as any).eventNo,
+        operatorId: flow.operatorId,
+        operatorName: flow.operatorName || (operatorUser ? operatorUser.realName || operatorUser.username : ""),
+        targetUserId: matchedNotif ? matchedNotif.userId : null,
+        targetUserName: matchedNotif
+          ? (targetUser ? targetUser.realName || targetUser.username : "")
+          : ((event as any).assigneeName || ""),
+        content: flow.remark || "",
+        notificationId: matchedNotif ? matchedNotif.id : null,
+        notificationRead: matchedNotif ? matchedNotif.isRead : false,
+        notificationReadAt: matchedNotif && matchedNotif.isRead ? matchedNotif.readAt : null,
+        createdAt: flow.createdAt,
+        order: idx + 1,
+      };
+    });
+
+    success(res, {
+      eventId: event.id,
+      eventNo: (event as any).eventNo,
+      total: records.length,
+      records,
+    }, "Urge history retrieved successfully");
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
