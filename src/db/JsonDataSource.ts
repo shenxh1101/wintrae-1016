@@ -315,6 +315,25 @@ class JsonQueryBuilder<T extends { id: string }> {
     return this;
   }
 
+  private compareValues(a: any, b: any): number {
+    if (a === null || a === undefined || b === null || b === undefined) {
+      if (a === b) return 0;
+      if (a === null || a === undefined) return -1;
+      return 1;
+    }
+    const aIsDate = a instanceof Date || !isNaN(Date.parse(a));
+    const bIsDate = b instanceof Date || !isNaN(Date.parse(b));
+    if (aIsDate && bIsDate) {
+      return new Date(a).getTime() - new Date(b).getTime();
+    }
+    const aNum = Number(a);
+    const bNum = Number(b);
+    if (!isNaN(aNum) && !isNaN(bNum) && a !== "" && b !== "") {
+      return aNum - bNum;
+    }
+    return String(a).localeCompare(String(b));
+  }
+
   private evalCondition(row: any, sql: string, params: Record<string, any>): boolean {
     try {
       sql = sql.trim();
@@ -345,28 +364,28 @@ class JsonQueryBuilder<T extends { id: string }> {
       if (gtMatch) {
         const field = this.stripAlias(gtMatch[1]);
         const val = params[gtMatch[2]];
-        return new Date(row[field]).getTime() > new Date(val).getTime();
+        return this.compareValues(row[field], val) > 0;
       }
 
       const ltMatch = sql.match(/^(\w+(?:\.\w+)?)\s*<\s*:(\w+)$/);
       if (ltMatch) {
         const field = this.stripAlias(ltMatch[1]);
         const val = params[ltMatch[2]];
-        return new Date(row[field]).getTime() < new Date(val).getTime();
+        return this.compareValues(row[field], val) < 0;
       }
 
       const gteMatch = sql.match(/^(\w+(?:\.\w+)?)\s*>=\s*:(\w+)$/);
       if (gteMatch) {
         const field = this.stripAlias(gteMatch[1]);
         const val = params[gteMatch[2]];
-        return new Date(row[field]).getTime() >= new Date(val).getTime();
+        return this.compareValues(row[field], val) >= 0;
       }
 
       const lteMatch = sql.match(/^(\w+(?:\.\w+)?)\s*<=\s*:(\w+)$/);
       if (lteMatch) {
         const field = this.stripAlias(lteMatch[1]);
         const val = params[lteMatch[2]];
-        return new Date(row[field]).getTime() <= new Date(val).getTime();
+        return this.compareValues(row[field], val) <= 0;
       }
 
       const neqMatch = sql.match(/^(\w+(?:\.\w+)?)\s*!=\s*:(\w+)$/);
@@ -376,6 +395,27 @@ class JsonQueryBuilder<T extends { id: string }> {
         return String(row[field]) !== String(val);
       }
 
+      const isNullMatch = sql.match(/^(\w+(?:\.\w+)?)\s+IS\s+NULL$/i);
+      if (isNullMatch) {
+        const field = this.stripAlias(isNullMatch[1]);
+        return row[field] === null || row[field] === undefined;
+      }
+
+      const isNotNullMatch = sql.match(/^(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL$/i);
+      if (isNotNullMatch) {
+        const field = this.stripAlias(isNotNullMatch[1]);
+        return row[field] !== null && row[field] !== undefined;
+      }
+
+      const parenOrMatch = sql.match(/^\((\w+(?:\.\w+)?)\s*=\s*:(\w+)\s+OR\s+(\w+(?:\.\w+)?)\s*=\s*:(\w+)\)$/i);
+      if (parenOrMatch) {
+        const f1 = this.stripAlias(parenOrMatch[1]);
+        const v1 = params[parenOrMatch[2]];
+        const f2 = this.stripAlias(parenOrMatch[3]);
+        const v2 = params[parenOrMatch[4]];
+        return String(row[f1]) === String(v1) || String(row[f2]) === String(v2);
+      }
+
       if (sql === "1=1") return true;
 
       const betweenMatch = sql.match(/^(\w+(?:\.\w+)?)\s+BETWEEN\s+:(\w+)\s+AND\s+:(\w+)$/i);
@@ -383,12 +423,13 @@ class JsonQueryBuilder<T extends { id: string }> {
         const field = this.stripAlias(betweenMatch[1]);
         const v1 = params[betweenMatch[2]];
         const v2 = params[betweenMatch[3]];
-        const rv = new Date(row[field]).getTime();
-        return rv >= new Date(v1).getTime() && rv <= new Date(v2).getTime();
+        return this.compareValues(row[field], v1) >= 0 && this.compareValues(row[field], v2) <= 0;
       }
 
+      console.warn("[JsonQueryBuilder] Unhandled where condition:", sql);
       return true;
     } catch (e) {
+      console.warn("[JsonQueryBuilder] Condition eval error:", sql, e);
       return true;
     }
   }

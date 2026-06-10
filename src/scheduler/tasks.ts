@@ -29,39 +29,40 @@ export async function checkOverdueTasks() {
 
     for (const event of overdueEvents) {
       event.isOverdue = true;
-      if (event.status !== EVENT_STATUS.COMPLETED && event.status !== EVENT_STATUS.CLOSED) {
-        event.status = EVENT_STATUS.OVERDUE;
-      }
+      const prevStatus = event.status;
+      event.status = EVENT_STATUS.OVERDUE;
       await eventRepo.save(event);
 
-      if (event.assignedToId) {
+      const handlerId = event.assigneeId;
+      if (handlerId) {
         const existingNotif = await notifRepo.findOne({
           where: {
             eventId: event.id,
-            type: "event_overdue",
-            userId: event.assignedToId,
+            type: "overdue",
+            userId: handlerId,
           },
         });
         if (!existingNotif) {
           const notif = notifRepo.create({
-            userId: event.assignedToId,
-            type: "event_overdue",
-            title: "任务超时提醒",
-            content: `事件《${event.title}》（${event.eventNo}）已超过处置期限，请尽快处理！`,
+            userId: handlerId,
+            type: "overdue",
+            title: "Task overdue alert",
+            content: `Event "${event.title}" (${event.eventNo}) has exceeded the deadline. Please handle it as soon as possible.`,
             eventId: event.id,
+            isRead: false,
           });
           await notifRepo.save(notif);
         }
       }
 
-      console.log(`[超时检查] 事件 ${event.eventNo} 已标记为超时`);
+      console.log(`[Overdue Check] Event ${event.eventNo} marked as overdue (was ${prevStatus})`);
     }
 
     if (overdueEvents.length > 0) {
-      console.log(`[超时检查] 共处理 ${overdueEvents.length} 个超时事件`);
+      console.log(`[Overdue Check] Processed ${overdueEvents.length} overdue events`);
     }
   } catch (err) {
-    console.error("[超时检查] 执行失败:", err);
+    console.error("[Overdue Check] Failed:", err);
   }
 }
 
@@ -84,22 +85,23 @@ export async function checkDeadlineApproaching() {
       .getMany();
 
     for (const event of warningEvents) {
-      if (event.assignedToId) {
+      const handlerId = event.assigneeId;
+      if (handlerId) {
         const existingNotif = await notifRepo.findOne({
           where: {
             eventId: event.id,
-            type: "event_overdue",
-            userId: event.assignedToId,
-            isRead: false,
+            type: "deadline_approaching",
+            userId: handlerId,
           },
         });
         if (!existingNotif) {
           const notif = notifRepo.create({
-            userId: event.assignedToId,
-            type: "event_overdue",
-            title: "任务即将超时提醒",
-            content: `事件《${event.title}》（${event.eventNo}）将在2小时内到期，请抓紧处理！`,
+            userId: handlerId,
+            type: "deadline_approaching",
+            title: "Deadline approaching",
+            content: `Event "${event.title}" (${event.eventNo}) will be due within 2 hours. Please hurry up.`,
             eventId: event.id,
+            isRead: false,
           });
           await notifRepo.save(notif);
         }
@@ -107,10 +109,10 @@ export async function checkDeadlineApproaching() {
     }
 
     if (warningEvents.length > 0) {
-      console.log(`[即将到期] 共发送 ${warningEvents.length} 条提醒通知`);
+      console.log(`[Deadline Approaching] Sent ${warningEvents.length} reminder notifications`);
     }
   } catch (err) {
-    console.error("[即将到期检查] 执行失败:", err);
+    console.error("[Deadline Approaching Check] Failed:", err);
   }
 }
 

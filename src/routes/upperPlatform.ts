@@ -145,14 +145,17 @@ router.get("/events", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROLES.A
       endDate,
       sourcePlatform,
       communityId,
+      gridWorkerId,
+      gridAreaId,
+      isOverdue,
+      isRepeated,
     } = req.query;
 
     const eventRepo = AppDataSource.getRepository(Event);
 
     let queryBuilder = eventRepo.createQueryBuilder("e")
       .leftJoinAndSelect("e.community", "c")
-      .leftJoinAndSelect("e.gridArea", "g")
-      .where("e.reportedFrom IS NOT NULL");
+      .leftJoinAndSelect("e.gridArea", "g");
 
     if (status) {
       queryBuilder = queryBuilder.andWhere("e.status = :status", { status });
@@ -168,6 +171,27 @@ router.get("/events", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROLES.A
 
     if (communityId) {
       queryBuilder = queryBuilder.andWhere("e.communityId = :cid", { cid: communityId });
+    }
+
+    if (gridAreaId) {
+      queryBuilder = queryBuilder.andWhere("e.gridAreaId = :gid", { gid: gridAreaId });
+    }
+
+    if (gridWorkerId) {
+      queryBuilder = queryBuilder.andWhere(
+        "(e.reporterId = :gwid OR e.assigneeId = :gwid)",
+        { gwid: gridWorkerId }
+      );
+    }
+
+    if (isOverdue !== undefined && isOverdue !== null) {
+      const overdue = String(isOverdue) === "true";
+      queryBuilder = queryBuilder.andWhere("e.isOverdue = :io", { io: overdue });
+    }
+
+    if (isRepeated !== undefined && isRepeated !== null) {
+      const repeated = String(isRepeated) === "true";
+      queryBuilder = queryBuilder.andWhere("e.isRepeated = :ir", { ir: repeated });
     }
 
     if (startDate) {
@@ -202,7 +226,7 @@ router.get("/events/:id", authMiddleware, requireRoles(ROLES.UPPER_PLATFORM, ROL
 
     const event = await eventRepo.findOne({
       where: { id: req.params.id },
-      relations: ["community", "gridArea", "assignedTo"],
+      relations: ["community", "gridArea", "assignee"],
     });
 
     if (!event) {

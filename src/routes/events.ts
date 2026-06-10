@@ -131,7 +131,7 @@ router.get("/", authMiddleware, async (req: Request, res: Response, next: NextFu
       .leftJoinAndSelect("e.community", "c")
       .leftJoinAndSelect("e.gridArea", "g")
       .leftJoinAndSelect("e.reporter", "r")
-      .leftJoinAndSelect("e.assignedTo", "a");
+      .leftJoinAndSelect("e.assignee", "a");
 
     if (keyword) {
       queryBuilder = queryBuilder.where(
@@ -216,7 +216,7 @@ router.get("/:id", authMiddleware, async (req: Request, res: Response, next: Nex
 
     const event = await eventRepo.findOne({
       where: { id: req.params.id },
-      relations: ["community", "gridArea", "reporter", "assignedTo"],
+      relations: ["community", "gridArea", "reporter", "assignee"],
     });
 
     if (!event) {
