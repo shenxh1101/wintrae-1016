@@ -1,0 +1,29 @@
+export class DisputeRecord {
+  id!: string;
+  title!: string;
+  disputeType!: string;
+  description!: string;
+  status!: string;
+  partyAId?: string;
+  partyA?: any;
+  partyAName?: string;
+  partyBName?: string;
+  partyBContact?: string;
+  mediatorId?: string;
+  mediator?: any;
+  mediatorName?: string;
+  communityId?: string;
+  community?: any;
+  gridAreaId?: string;
+  gridArea?: any;
+  locationAddress?: string;
+  occurrenceTime?: Date;
+  mediationProcess?: string;
+  mediationResult?: string;
+  agreement?: string;
+  resolvedAt?: Date;
+  remark?: string;
+  relatedEventId?: string;
+  createdAt!: Date;
+  updatedAt!: Date;
+}
